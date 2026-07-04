@@ -11,7 +11,7 @@ from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 import database
 from connectors import (
-    GeminiConnector, OpenAIConnector, ClaudeConnector,
+    GeminiConnector, CodeSpecialistConnector, WritingSpecialistConnector,
     OllamaConnector, PythonExecutorConnector, HiveOrchestrator
 )
 
@@ -28,21 +28,21 @@ app.add_middleware(
 )
 
 # Instantiate all connectors once at startup
-gemini = GeminiConnector()
-openai_conn = OpenAIConnector()
-claude = ClaudeConnector()
-ollama = OllamaConnector()
-executor = PythonExecutorConnector()
-hive = HiveOrchestrator()
+gemini = GeminiConnector()        # 🧠 Orchestrator + computation
+coder = CodeSpecialistConnector() # 💻 Code generation (Gemini 2.0 Flash)
+writer = WritingSpecialistConnector() # ✍️ Writing & analysis (Gemini 2.5 Lite)
+ollama = OllamaConnector()        # 🦙 100% local
+executor = PythonExecutorConnector() # ⚡ Raw Python
+hive = HiveOrchestrator()         # 🐝 Auto routing
 
 # Model name → connector mapping
 MODEL_REGISTRY = {
+    "🐝 Auto Hive Mode": hive,
     "Gemini 2.5 Flash (Cloud)": gemini,
-    "GPT-4o (Cloud)": openai_conn,
-    "Claude Sonnet (Cloud)": claude,
+    "Code Specialist (Gemini 2.0)": coder,
+    "Writing Specialist (Gemini Lite)": writer,
     "Llama 3.2 (Local)": ollama,
     "Python Executor (Local)": executor,
-    "🐝 Auto Hive Mode": hive,
 }
 
 # Dependency to get a database session for each request

@@ -116,14 +116,14 @@ export default function Home() {
           onChange={(e) => setModel(e.target.value)}
         >
           <option value="🐝 Auto Hive Mode">🐝 Auto Hive Mode</option>
-          <optgroup label="☁️ Cloud Models">
-            <option value="Gemini 2.5 Flash (Cloud)">Gemini 2.5 Flash</option>
-            <option value="GPT-4o (Cloud)">GPT-4o (OpenAI)</option>
-            <option value="Claude Sonnet (Cloud)">Claude Sonnet</option>
+          <optgroup label="☁️ Gemini Family (Free)">
+            <option value="Gemini 2.5 Flash (Cloud)">🧠 Gemini 2.5 Flash (Orchestrator)</option>
+            <option value="Code Specialist (Gemini 2.0)">💻 Code Specialist (Gemini 2.0)</option>
+            <option value="Writing Specialist (Gemini Lite)">✍️ Writing Specialist (Gemini Lite)</option>
           </optgroup>
           <optgroup label="🖥️ Local Models">
-            <option value="Llama 3.2 (Local)">Llama 3.2 (Ollama)</option>
-            <option value="Python Executor (Local)">Python Executor</option>
+            <option value="Llama 3.2 (Local)">🦙 Llama 3.2 (Ollama)</option>
+            <option value="Python Executor (Local)">⚡ Python Executor</option>
           </optgroup>
         </select>
         <input

@@ -86,71 +86,77 @@ class GeminiConnector:
 
 
 # ─────────────────────────────────────────────
-# 🤖 GPT-4o CONNECTOR (OpenAI)
-# Uses OpenAI's GPT-4o. GPT-4o is best known
-# for instruction following and code generation.
-# In Hive Auto Mode, it is used for coding tasks.
+# 🤖 CODE SPECIALIST (Gemini 2.0 Flash)
+# Gemini 2.0 Flash is optimized for speed and
+# code generation tasks. In Hive Auto Mode, this
+# node receives any coding/debugging tasks.
+#
+# 💡 LEARNING NOTE: This is called "Specialization".
+# Even within the same model family, different
+# versions have different speed/capability tradeoffs.
+# gemini-2.0-flash prioritizes low-latency responses,
+# making it ideal for iterative coding tasks.
 # ─────────────────────────────────────────────
-class OpenAIConnector:
+class CodeSpecialistConnector:
     def __init__(self):
-        from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.client = OpenAI(api_key=api_key) if api_key else None
+        import google.generativeai as genai
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(
+            'gemini-2.0-flash',
+            system_instruction=(
+                "You are NeuroSync's Code Specialist Node, powered by Gemini 2.0 Flash. "
+                "You are a world-class software engineer. "
+                "Write clean, well-commented, production-quality code. "
+                "Always explain what your code does step by step. "
+                "Format all responses in beautiful Markdown with proper code blocks."
+            )
+        )
 
     def query(self, prompt: str) -> Tuple[str, str]:
-        if not self.client:
-            return "System-Error", "OpenAI API key not configured in .env"
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are NeuroSync's GPT-4o Node. You are a specialist in "
-                            "writing clean, well-commented code and structured analysis. "
-                            "Format all responses in clear, beautiful Markdown."
-                        )
-                    },
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return "GPT-4o", response.choices[0].message.content
+            response = self.model.generate_content(prompt)
+            return "Code-Specialist (Gemini-2.0-Flash)", response.text
         except Exception as e:
-            return "System-Error", f"GPT-4o failed: {str(e)}"
+            return "System-Error", f"Code Specialist failed: {str(e)}"
 
 
 # ─────────────────────────────────────────────
-# 🤖 CLAUDE CONNECTOR (Anthropic)
-# Uses Anthropic's Claude Sonnet. Claude is
-# widely known as the best model for nuanced
-# writing, analysis, and long-context reasoning.
-# In Hive Auto Mode, it is used for writing tasks.
+# ✍️ WRITING SPECIALIST (Gemini 2.5 Flash Lite)
+# Gemini 2.5 Flash Lite is the most lightweight,
+# cost-efficient model in the family. It is ideal
+# for high-throughput writing and summarization.
+#
+# 💡 LEARNING NOTE: "Lite" models exist because
+# not every task needs a massive reasoning model.
+# Asking a billion-parameter model to write a short
+# paragraph is wasteful. This is "right-sizing"
+# your AI — a key principle in production systems.
 # ─────────────────────────────────────────────
-class ClaudeConnector:
+class WritingSpecialistConnector:
     def __init__(self):
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        self.api_key = api_key
+        import google.generativeai as genai
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(
+            'gemini-2.5-flash-lite',
+            system_instruction=(
+                "You are NeuroSync's Writing Specialist Node, powered by Gemini 2.5 Flash Lite. "
+                "You are an expert writer, analyst, and communicator. "
+                "Produce nuanced, well-structured, deeply insightful content. "
+                "Use clear headings, bullet points, and examples. "
+                "Format all responses in beautiful Markdown."
+            )
+        )
 
     def query(self, prompt: str) -> Tuple[str, str]:
-        if not self.api_key:
-            return "System-Error", "Anthropic API key not configured in .env"
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=self.api_key)
-            response = client.messages.create(
-                model="claude-sonnet-4-5",
-                max_tokens=2048,
-                system=(
-                    "You are NeuroSync's Claude Node. You are a specialist in nuanced "
-                    "writing, long-form analysis, and creative problem solving. "
-                    "Format all responses in clean, beautiful Markdown."
-                ),
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return "Claude-Sonnet", response.content[0].text
+            response = self.model.generate_content(prompt)
+            return "Writing-Specialist (Gemini-2.5-Flash-Lite)", response.text
         except Exception as e:
-            return "System-Error", f"Claude failed: {str(e)}"
+            return "System-Error", f"Writing Specialist failed: {str(e)}"
 
 
 # ─────────────────────────────────────────────
@@ -210,35 +216,42 @@ class PythonExecutorConnector:
 # automatically routes it to the best specialist.
 #
 # KEY CONCEPT: This is "Agentic Routing" — the
-# Orchestrator AI (Gemini) reads the task and
-# outputs a routing decision in JSON. We parse
+# Orchestrator AI (Gemini 2.5 Flash) reads the task
+# and outputs a routing decision in JSON. We parse
 # that JSON and call the appropriate specialist.
+#
+# 💡 LEARNING NOTE: This pattern is called the
+# "Manager-Worker" or "Orchestrator-Subagent" pattern.
+# It is the foundation of frameworks like LangGraph,
+# AutoGen, and CrewAI. You are building it from scratch.
 # ─────────────────────────────────────────────
 class HiveOrchestrator:
     def __init__(self):
-        self.gemini = GeminiConnector()
-        self.openai = OpenAIConnector()
-        self.claude = ClaudeConnector()
-        self.ollama = OllamaConnector()
-        self.executor = PythonExecutorConnector()
+        self.gemini = GeminiConnector()          # 🧠 Orchestrator + computation
+        self.coder = CodeSpecialistConnector()   # 💻 Code generation (Gemini 2.0 Flash)
+        self.writer = WritingSpecialistConnector() # ✍️ Writing & analysis (Gemini 2.5 Lite)
+        self.ollama = OllamaConnector()          # 🦙 100% local, private
+        self.executor = PythonExecutorConnector() # ⚡ Raw Python execution
 
     def query(self, prompt: str) -> Tuple[str, str]:
-        # Step 1: Use Gemini as the routing brain to classify the task
+        import google.generativeai as genai
+        # Step 1: Use a lightweight Gemini model as the routing brain
+        # It only has ONE job: classify the task type and output a JSON decision.
+        # It does NOT answer the question itself.
         try:
-            import google.generativeai as genai
             router_model = genai.GenerativeModel(
-                'gemini-2.5-flash',
+                'gemini-2.0-flash-lite',
                 system_instruction=(
                     "You are a task router for a multi-agent AI system. "
                     "Analyze the user's task and reply with ONLY a JSON object (no markdown, no explanation). "
                     "The JSON must have two keys: "
-                    "'agent' (one of: 'gemini', 'openai', 'claude', 'ollama', 'executor') and "
+                    "'agent' (one of: 'gemini', 'coder', 'writer', 'ollama', 'executor') and "
                     "'reason' (a one-sentence explanation). "
-                    "Rules: "
-                    "- Tasks requiring math, computation, or running code → 'gemini' (has code executor tool). "
-                    "- Tasks requiring code writing, debugging, technical explanation → 'openai'. "
-                    "- Tasks requiring creative writing, analysis, summarization, essays → 'claude'. "
-                    "- Tasks requiring private/offline processing → 'ollama'. "
+                    "Routing Rules: "
+                    "- Math, computation, data analysis, running code → 'gemini' (has Python executor tool). "
+                    "- Writing code, debugging, explaining technical concepts → 'coder'. "
+                    "- Essays, analysis, summaries, creative writing, explanations → 'writer'. "
+                    "- Tasks requiring privacy/offline processing → 'ollama'. "
                     "- Simple arithmetic only → 'executor'."
                 )
             )
@@ -248,21 +261,25 @@ class HiveOrchestrator:
             agent = decision.get("agent", "gemini")
             reason = decision.get("reason", "Routed by Hive Orchestrator")
         except Exception as e:
-            # If routing fails, fall back to Gemini
             agent = "gemini"
-            reason = f"Routing failed ({e}), defaulted to Gemini."
+            reason = f"Routing failed ({e}), defaulted to Gemini Orchestrator."
 
-        # Step 2: Dispatch to the chosen specialist
-        routing_header = f"🐝 **Hive Routed → {agent.upper()}** _{reason}_\n\n---\n\n"
-        if agent == "openai":
-            node, text = self.openai.query(prompt)
-        elif agent == "claude":
-            node, text = self.claude.query(prompt)
-        elif agent == "ollama":
-            node, text = self.ollama.query(prompt)
-        elif agent == "executor":
-            node, text = self.executor.query(prompt)
-        else:  # gemini (default + computation tasks)
-            node, text = self.gemini.query(prompt)
+        # Step 2: Map the routing decision to the actual connector
+        agent_map = {
+            "gemini": ("🧠 Gemini 2.5 Flash (Orchestrator)", self.gemini),
+            "coder": ("💻 Code Specialist (Gemini 2.0 Flash)", self.coder),
+            "writer": ("✍️ Writing Specialist (Gemini 2.5 Lite)", self.writer),
+            "ollama": ("🦙 Llama 3.2 Local", self.ollama),
+            "executor": ("⚡ Python Executor", self.executor),
+        }
+        label, connector = agent_map.get(agent, ("🧠 Gemini 2.5 Flash", self.gemini))
 
-        return f"Hive→{node}", routing_header + text
+        # Step 3: Build a header that shows the routing decision in the UI
+        routing_header = (
+            f"🐝 **Hive Routed → {label}**\n"
+            f"> _{reason}_\n\n---\n\n"
+        )
+
+        # Step 4: Call the specialist
+        node_name, text = connector.query(prompt)
+        return f"Hive→{node_name}", routing_header + text

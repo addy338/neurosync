@@ -108,7 +108,7 @@ export default function Home() {
         >
           <option value="Llama 3.2 (Local)">Llama 3.2 (Local)</option>
           <option value="Python Executor (Local)">Python Executor (Local)</option>
-          <option value="Gemini 2.5 Pro (Cloud)">Gemini 2.5 Pro (Cloud)</option>
+          <option value="Gemini 2.5 Flash (Cloud)">Gemini 2.5 Flash (Cloud)</option>
         </select>
         <input
           type="text"

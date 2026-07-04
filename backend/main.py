@@ -57,7 +57,7 @@ def create_task(request: PromptRequest, db: Session = Depends(get_db)):
     Receive a complex prompt, route it to a node, and log the result.
     """
     # Route the prompt
-    if request.model == "Gemini 2.5 Pro (Cloud)":
+    if request.model == "Gemini 2.5 Flash (Cloud)":
         node_name, response_text = cloud_connector.query(request.prompt)
     elif request.model == "Python Executor (Local)":
         node_name, response_text = local_connector.execute_python(request.prompt)

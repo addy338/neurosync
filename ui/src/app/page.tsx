@@ -13,7 +13,7 @@ type Message = {
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("Llama 3.2 (Local)");
+  const [model, setModel] = useState("🐝 Auto Hive Mode");
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 0,
@@ -115,9 +115,16 @@ export default function Home() {
           value={model}
           onChange={(e) => setModel(e.target.value)}
         >
-          <option value="Llama 3.2 (Local)">Llama 3.2 (Local)</option>
-          <option value="Python Executor (Local)">Python Executor (Local)</option>
-          <option value="Gemini 2.5 Flash (Cloud)">Gemini 2.5 Flash (Cloud)</option>
+          <option value="🐝 Auto Hive Mode">🐝 Auto Hive Mode</option>
+          <optgroup label="☁️ Cloud Models">
+            <option value="Gemini 2.5 Flash (Cloud)">Gemini 2.5 Flash</option>
+            <option value="GPT-4o (Cloud)">GPT-4o (OpenAI)</option>
+            <option value="Claude Sonnet (Cloud)">Claude Sonnet</option>
+          </optgroup>
+          <optgroup label="🖥️ Local Models">
+            <option value="Llama 3.2 (Local)">Llama 3.2 (Ollama)</option>
+            <option value="Python Executor (Local)">Python Executor</option>
+          </optgroup>
         </select>
         <input
           type="text"

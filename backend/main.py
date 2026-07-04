@@ -10,10 +10,13 @@ from pydantic import BaseModel
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 import database
-from connectors import LocalConnectors, CloudConnectors
+from connectors import (
+    GeminiConnector, OpenAIConnector, ClaudeConnector,
+    OllamaConnector, PythonExecutorConnector, HiveOrchestrator
+)
 
 # Initialize the FastAPI app
-app = FastAPI(title="NeuroSync Omni-AI Hub", version="1.0.0")
+app = FastAPI(title="NeuroSync Omni-AI Hub", version="2.0.0")
 
 # Setup CORS to allow Next.js (port 3000) to communicate with FastAPI
 app.add_middleware(
@@ -24,8 +27,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-local_connector = LocalConnectors()
-cloud_connector = CloudConnectors()
+# Instantiate all connectors once at startup
+gemini = GeminiConnector()
+openai_conn = OpenAIConnector()
+claude = ClaudeConnector()
+ollama = OllamaConnector()
+executor = PythonExecutorConnector()
+hive = HiveOrchestrator()
+
+# Model name → connector mapping
+MODEL_REGISTRY = {
+    "Gemini 2.5 Flash (Cloud)": gemini,
+    "GPT-4o (Cloud)": openai_conn,
+    "Claude Sonnet (Cloud)": claude,
+    "Llama 3.2 (Local)": ollama,
+    "Python Executor (Local)": executor,
+    "🐝 Auto Hive Mode": hive,
+}
 
 # Dependency to get a database session for each request
 def get_db():
@@ -38,7 +56,7 @@ def get_db():
 # Pydantic schema for the incoming request
 class PromptRequest(BaseModel):
     prompt: str
-    model: str = "Llama 3.2 (Local)"
+    model: str = "🐝 Auto Hive Mode"
 
 class TaskResponse(BaseModel):
     id: int
@@ -49,20 +67,15 @@ class TaskResponse(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the NeuroSync Omni-AI Orchestration Hub API"}
+    return {"message": "Welcome to the NeuroSync Omni-AI Orchestration Hub API v2.0"}
 
 @app.post("/tasks/", response_model=TaskResponse)
 def create_task(request: PromptRequest, db: Session = Depends(get_db)):
     """
-    Receive a complex prompt, route it to a node, and log the result.
+    Receive a complex prompt, route it to the correct node, and log the result.
     """
-    # Route the prompt
-    if request.model == "Gemini 2.5 Flash (Cloud)":
-        node_name, response_text = cloud_connector.query(request.prompt)
-    elif request.model == "Python Executor (Local)":
-        node_name, response_text = local_connector.execute_python(request.prompt)
-    else:
-        node_name, response_text = local_connector.query(request.prompt)
+    connector = MODEL_REGISTRY.get(request.model, hive)
+    node_name, response_text = connector.query(request.prompt)
 
     # Save to database
     new_task = database.TaskLog(

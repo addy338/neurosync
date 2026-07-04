@@ -14,6 +14,7 @@ from connectors import (
     GeminiConnector, CodeSpecialistConnector, WritingSpecialistConnector,
     OllamaConnector, PythonExecutorConnector, HiveOrchestrator
 )
+from memory import memory
 
 # Initialize the FastAPI app
 app = FastAPI(title="NeuroSync Omni-AI Hub", version="2.0.0")
@@ -72,12 +73,25 @@ def read_root():
 @app.post("/tasks/", response_model=TaskResponse)
 def create_task(request: PromptRequest, db: Session = Depends(get_db)):
     """
-    Receive a complex prompt, route it to the correct node, and log the result.
+    Receive a complex prompt, retrieve past memory, route it, and save the result.
     """
-    connector = MODEL_REGISTRY.get(request.model, hive)
-    node_name, response_text = connector.query(request.prompt)
+    # 🧠 Step 1: Memory Recall (RAG)
+    # Check if we have past context relevant to this prompt
+    past_context = memory.recall_memory(request.prompt)
+    
+    # Construct the final prompt to send to the AI
+    enriched_prompt = past_context + request.prompt if past_context else request.prompt
 
-    # Save to database
+    # 🐝 Step 2: Routing & Execution
+    connector = MODEL_REGISTRY.get(request.model, hive)
+    node_name, response_text = connector.query(enriched_prompt)
+    
+    # 🧠 Step 3: Memory Storage
+    # Save this interaction to Long-Term Memory
+    memory.add_memory(request.prompt, response_text, node_name)
+
+    # 💾 Step 4: UI Database Storage
+    # Save to SQLite database for the UI history
     new_task = database.TaskLog(
         original_prompt=request.prompt,
         status="success",

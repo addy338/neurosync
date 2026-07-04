@@ -39,7 +39,33 @@ class CloudConnectors:
         try:
             chat = self.model.start_chat(enable_automatic_function_calling=True)
             response = chat.send_message(prompt)
-            return "Orchestrator-Node", response.text
+            
+            # Extract orchestration steps to make them visible in the UI
+            orchestration_log = ""
+            for msg in chat.history:
+                for part in msg.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        try:
+                            # Try to extract the python code
+                            code = part.function_call.args['code']
+                            orchestration_log += f"**⚡ Action: Writing Python Script**\n```python\n{code}\n```\n\n"
+                        except:
+                            pass
+                    elif hasattr(part, 'function_response') and part.function_response:
+                        try:
+                            # Try to extract the result string
+                            # GenerativeAI SDK represents it as a dict-like struct
+                            result_data = dict(part.function_response.response)
+                            # The script returns a string which is usually in a key (like 'result' or 'output')
+                            res_str = str(result_data)
+                            if len(res_str) > 200:
+                                res_str = res_str[:200] + "... (truncated)"
+                            orchestration_log += f"**⚡ Action: Execution Result**\n```text\n{res_str}\n```\n\n---\n"
+                        except:
+                            pass
+            
+            final_text = orchestration_log + response.text
+            return "Orchestrator-Node", final_text
         except Exception as e:
             return "System-Error", f"Failed to connect to Gemini: {str(e)}"
 

@@ -13,7 +13,7 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: 1,
+      id: 0,
       text: "NeuroSync initialized. Connected to Local and Cloud AI nodes. Awaiting complex task routing.",
       sender: "ai",
       node: "System Core"

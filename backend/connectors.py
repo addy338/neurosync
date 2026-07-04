@@ -8,6 +8,15 @@ from typing import Tuple
 
 import google.generativeai as genai
 
+def execute_python_code(code: str) -> str:
+    """Executes the given Python code locally and returns its stdout/stderr. Use this to perform calculations, data processing, or fetching data."""
+    try:
+        result = subprocess.run(["python", "-c", code], capture_output=True, text=True, timeout=15)
+        out = result.stdout + "\n" + result.stderr
+        return out if out.strip() else "Executed successfully with no output."
+    except Exception as e:
+        return f"Execution Error: {e}"
+
 class CloudConnectors:
     """
     Real connector for Cloud AI APIs (Gemini)
@@ -17,15 +26,20 @@ class CloudConnectors:
         api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
             genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel(
+            'gemini-2.5-flash', 
+            tools=[execute_python_code],
+            system_instruction="You are NeuroSync, the Omni-AI Orchestrator. When given a complex task (like math, data processing, fetching web data), you MUST write and execute Python code using your execute_python_code tool to find the answer. Do not guess. Once you get the result from the tool, synthesize a beautiful, well-formatted Markdown response."
+        )
 
     def query(self, prompt: str) -> Tuple[str, str]:
         """
         Sends the prompt to Google Gemini.
         """
         try:
-            response = self.model.generate_content(prompt)
-            return "Gemini-1.5-Pro", response.text
+            chat = self.model.start_chat(enable_automatic_function_calling=True)
+            response = chat.send_message(prompt)
+            return "Orchestrator-Node", response.text
         except Exception as e:
             return "System-Error", f"Failed to connect to Gemini: {str(e)}"
 

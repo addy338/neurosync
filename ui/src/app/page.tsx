@@ -1,5 +1,7 @@
 "use client";
 
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useState, useRef, useEffect } from "react";
 
 type Message = {
@@ -76,6 +78,7 @@ export default function Home() {
       </header>
 
       <div className="glass-panel chat-box">
+
         {messages.map((msg) => (
           <div key={msg.id} className={`message ${msg.sender}`}>
             {msg.sender === "ai" && (
@@ -83,8 +86,14 @@ export default function Home() {
                 <span style={{ fontSize: '1.2em' }}>⚡</span> {msg.node}
               </div>
             )}
-            <div className="bubble">
-              {msg.text}
+            <div className={`bubble ${msg.sender === "ai" ? "markdown-body" : ""}`}>
+              {msg.sender === "ai" ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {msg.text}
+                </ReactMarkdown>
+              ) : (
+                msg.text
+              )}
             </div>
           </div>
         ))}

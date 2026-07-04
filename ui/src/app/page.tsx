@@ -21,7 +21,7 @@ export default function Home() {
   ]);
   const [isTyping, setIsTyping] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim()) return;
 
@@ -31,21 +31,36 @@ export default function Home() {
     setPrompt("");
     setIsTyping(true);
 
-    // Simulate backend routing and response
-    setTimeout(() => {
-      const nodes = ["Claude-3.5-Sonnet", "Llama-3-Local", "Open-Interpreter", "Gemini-1.5-Pro"];
-      const randomNode = nodes[Math.floor(Math.random() * nodes.length)];
+    try {
+      // Send real request to FastAPI Backend
+      const response = await fetch("http://localhost:8000/tasks/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ prompt: newUserMsg.text }),
+      });
+
+      const data = await response.json();
       
       const newAiMsg: Message = {
-        id: Date.now() + 1,
-        text: `Task delegated successfully. Processed output from requested operation.`,
+        id: data.id || Date.now() + 1,
+        text: data.response_text || "Task completed.",
         sender: "ai",
-        node: randomNode
+        node: data.assigned_node || "System"
       };
       
       setMessages(prev => [...prev, newAiMsg]);
+    } catch (error) {
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1,
+        text: "Error: Could not connect to the NeuroSync backend. Is the FastAPI server running on port 8000?",
+        sender: "ai",
+        node: "System Error"
+      }]);
+    } finally {
       setIsTyping(false);
-    }, 1500);
+    }
   };
 
   return (

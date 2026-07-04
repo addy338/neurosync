@@ -3,18 +3,31 @@ import random
 import urllib.request
 import urllib.error
 import subprocess
+import os
 from typing import Tuple
+
+import google.generativeai as genai
 
 class CloudConnectors:
     """
-    Mock connector for Cloud AI APIs (Gemini, Claude)
+    Real connector for Cloud AI APIs (Gemini)
     """
     def __init__(self):
-        self.available_models = ["gemini-pro", "claude-3-opus"]
+        # Configure Gemini using the key from .env
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-pro')
 
-    def query(self, prompt: str) -> str:
-        model = random.choice(self.available_models)
-        return f"[{model}] Successfully processed: {prompt[:20]}..."
+    def query(self, prompt: str) -> Tuple[str, str]:
+        """
+        Sends the prompt to Google Gemini.
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            return "Gemini-1.5-Pro", response.text
+        except Exception as e:
+            return "System-Error", f"Failed to connect to Gemini: {str(e)}"
 
 class LocalConnectors:
     """
@@ -23,12 +36,25 @@ class LocalConnectors:
     def __init__(self):
         self.ollama_url = "http://localhost:11434/api/generate"
 
+    def execute_python(self, prompt: str) -> Tuple[str, str]:
+        """
+        Executes basic math logic as the Python node.
+        """
+        try:
+            clean_expr = "".join(c for c in prompt if c in "0123456789+-*/().")
+            if clean_expr:
+                ans = eval(clean_expr)
+                return "Python-Executor", f"Calculated Result: {ans}"
+            return "Python-Executor", "I am a local Python Executor. Give me a math problem like 'calculate 5 * 10'."
+        except Exception as e:
+            return "Python-Executor", f"Error during execution: {e}"
+
     def query(self, prompt: str) -> Tuple[str, str]:
         """
         Attempts to route the prompt to Ollama.
         If Ollama is down, falls back to local Python execution for basic commands.
         """
-        # 1. Try Ollama (using llama3.2:latest)
+        # Try Ollama (using llama3.2:latest)
         try:
             data = json.dumps({
                 "model": "llama3.2:latest",
@@ -39,22 +65,9 @@ class LocalConnectors:
             req = urllib.request.Request(self.ollama_url, data=data, headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=3) as response:
                 result = json.loads(response.read().decode('utf-8'))
-                return "Ollama-Llama3", result.get("response", "No response text")
+                return "Ollama-Llama3.2", result.get("response", "No response text")
         except Exception as e:
             print(f"Ollama connection failed: {e}. Falling back to Python Executor.")
 
-        # 2. Fallback: Python Executor (very basic execution)
-        if prompt.lower().startswith("echo"):
-            return "Python-Executor", prompt[5:]
-        elif "calculate" in prompt.lower() or "+" in prompt or "*" in prompt:
-            # Dangerous in prod, but a cool local demo
-            try:
-                # Strip text, try to just evaluate the math
-                clean_expr = "".join(c for c in prompt if c in "0123456789+-*/().")
-                if clean_expr:
-                    ans = eval(clean_expr)
-                    return "Python-Executor", f"Calculated Result: {ans}"
-            except:
-                pass
-        
-        return "System-Node", f"Received your prompt: '{prompt}'. (Ollama is not running locally, so I used the fallback node to just echo this back!)"
+        # Fallback
+        return self.execute_python(prompt)

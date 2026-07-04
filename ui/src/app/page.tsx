@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 
 type Message = {
   id: number;
@@ -11,15 +11,21 @@ type Message = {
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("Llama 3.2 (Local)");
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 0,
-      text: "NeuroSync initialized. Connected to Local and Cloud AI nodes. Awaiting complex task routing.",
+      text: "NeuroSync initialized. Omni-Model routing active. Awaiting task.",
       sender: "ai",
       node: "System Core"
     }
   ]);
   const [isTyping, setIsTyping] = useState(false);
+  const endOfMessagesRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +44,7 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ prompt: newUserMsg.text }),
+        body: JSON.stringify({ prompt: newUserMsg.text, model: model }),
       });
 
       const data = await response.json();
@@ -90,9 +96,20 @@ export default function Home() {
             </div>
           </div>
         )}
+        <div ref={endOfMessagesRef} />
       </div>
 
       <form onSubmit={handleSubmit} className="input-area">
+        <select 
+          className="prompt-input" 
+          style={{ width: 'auto', marginRight: '10px', padding: '0 10px' }}
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+        >
+          <option value="Llama 3.2 (Local)">Llama 3.2 (Local)</option>
+          <option value="Python Executor (Local)">Python Executor (Local)</option>
+          <option value="Gemini 1.5 Pro (Cloud)">Gemini 1.5 Pro (Cloud)</option>
+        </select>
         <input
           type="text"
           className="prompt-input"

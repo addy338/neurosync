@@ -1,7 +1,10 @@
 import json
 import os
 import io
+import re
 import sys
+import signal
+import threading
 import warnings
 from typing import Tuple
 from dotenv import load_dotenv
@@ -12,33 +15,136 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 load_dotenv()
 
 # ─────────────────────────────────────────────
+# 🔐 Singleton, thread-safe Gemini configuration
+# (Bug #23: every connector previously called
+# genai.configure() in __init__ — redundant global
+# state mutation with a real race condition under
+# FastAPI's threadpool-executed sync routes.)
+# ─────────────────────────────────────────────
+_genai_lock = threading.Lock()
+_genai_configured = False
+
+
+def _ensure_gemini_configured():
+    global _genai_configured
+    if _genai_configured:
+        return
+    with _genai_lock:
+        if _genai_configured:
+            return
+        import google.generativeai as genai
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY is not set. Create backend/.env with GEMINI_API_KEY=..."
+            )
+        genai.configure(api_key=api_key)
+        _genai_configured = True
+
+
+# ─────────────────────────────────────────────
 # 🔧 SHARED LOCAL TOOL
 # This function is given to the Orchestrator as
 # a callable tool. It runs Python code on the
 # LOCAL machine — something no cloud AI can do
 # on its own. This is NeuroSync's superpower.
+#
+# (Bugs #20/#21: this previously ran with full
+# __builtins__, no import restrictions, and no
+# timeout. Hardened below to a lightweight sandbox
+# — an allowlist of safe modules, blocked dangerous
+# builtins, and an 8s wall-clock timeout. This is
+# NOT equivalent to real process isolation; if this
+# service is ever exposed beyond localhost, that's
+# a hard prerequisite before doing so.)
 # ─────────────────────────────────────────────
-def execute_python_code(code: str) -> str:
+_ALLOWED_MODULES = {
+    "math", "statistics", "datetime", "json", "re", "itertools",
+    "collections", "random", "decimal", "functools", "string",
+}
+
+_BLOCKED_NAMES = {
+    "open", "exec", "eval", "compile", "__import__", "input", "help",
+    "exit", "quit", "globals", "locals", "vars", "dir", "breakpoint",
+}
+
+
+def _safe_import(name, globals_=None, locals_=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root not in _ALLOWED_MODULES:
+        raise ImportError(
+            f"Import of '{name}' is blocked in the sandboxed executor. "
+            f"Allowed modules: {sorted(_ALLOWED_MODULES)}"
+        )
+    return __import__(name, globals_, locals_, fromlist, level)
+
+
+def _build_safe_globals():
+    safe_builtins = {
+        k: v for k, v in __builtins__.items() if k not in _BLOCKED_NAMES
+    } if isinstance(__builtins__, dict) else {
+        k: getattr(__builtins__, k) for k in dir(__builtins__) if k not in _BLOCKED_NAMES
+    }
+    safe_builtins["__import__"] = _safe_import
+    return {"__builtins__": safe_builtins}
+
+
+_exec_lock = threading.Lock()  # Bug #24: serialize stdout/stderr redirect
+
+
+class _ExecTimeoutError(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _ExecTimeoutError("Execution exceeded time limit (8s)")
+
+
+def execute_python_code(code: str, timeout_seconds: int = 8) -> str:
     """
-    Executes the given Python code locally and returns stdout/stderr.
-    Uses in-process exec() to avoid subprocess forks that crash gRPC.
+    Executes code in a restricted namespace (no os/sys/subprocess imports,
+    no open/exec/eval), with a hard wall-clock timeout, and with stdout/
+    stderr capture serialized via a lock so concurrent requests can't
+    interleave each other's output.
     """
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    redirected_output = sys.stdout = io.StringIO()
-    redirected_error = sys.stderr = io.StringIO()
-    
-    try:
-        # Execute in a clean namespace
-        exec(code, {"__builtins__": __builtins__})
-    except Exception as e:
-        print(f"Execution Error: {e}", file=sys.stderr)
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        
-    out = (redirected_output.getvalue() + "\n" + redirected_error.getvalue()).strip()
-    return out if out else "Executed successfully with no output."
+    with _exec_lock:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        redirected_output = sys.stdout = io.StringIO()
+        redirected_error = sys.stderr = io.StringIO()
+
+        use_alarm = hasattr(signal, "SIGALRM")
+        if use_alarm:
+            old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(timeout_seconds)
+
+        try:
+            exec(code, _build_safe_globals())
+        except _ExecTimeoutError as e:
+            print(f"Execution Error: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"Execution Error: {e}", file=sys.stderr)
+        finally:
+            if use_alarm:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+        out = (redirected_output.getvalue() + "\n" + redirected_error.getvalue()).strip()
+        return out if out else "Executed successfully with no output."
+
+
+def _extract_json_block(raw: str) -> str:
+    """
+    Bug #22: the original used raw.strip("```json").strip("```") which
+    strips a *character set*, not the literal fence substring, and can
+    silently mangle legitimate JSON. This uses regex to remove actual
+    \`\`\`json ... \`\`\` or \`\`\` ... \`\`\` fences.
+    """
+    raw = raw.strip()
+    fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    return raw
 
 
 # ─────────────────────────────────────────────
@@ -49,10 +155,8 @@ def execute_python_code(code: str) -> str:
 # ─────────────────────────────────────────────
 class GeminiConnector:
     def __init__(self):
+        _ensure_gemini_configured()
         import google.generativeai as genai
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(
             'gemini-2.5-flash',
             tools=[execute_python_code],
@@ -111,10 +215,8 @@ class GeminiConnector:
 # ─────────────────────────────────────────────
 class CodeSpecialistConnector:
     def __init__(self):
+        _ensure_gemini_configured()
         import google.generativeai as genai
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(
             'gemini-2.0-flash',
             system_instruction=(
@@ -151,10 +253,8 @@ class CodeSpecialistConnector:
 # ─────────────────────────────────────────────
 class WritingSpecialistConnector:
     def __init__(self):
+        _ensure_gemini_configured()
         import google.generativeai as genai
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(
             'gemini-2.5-flash-lite',
             system_instruction=(
@@ -213,18 +313,30 @@ class OllamaConnector:
 # data processing, and system-level tasks.
 # ─────────────────────────────────────────────
 class PythonExecutorConnector:
+    """
+    Bug #20 (Critical): this previously fell through to
+    execute_python_code(prompt) for ANY non-arithmetic text — meaning
+    selecting this model and typing anything executed it as raw Python
+    with full os/subprocess access. Now ONLY evaluates clean arithmetic
+    expressions in a builtins-free eval; anything else is rejected rather
+    than executed.
+    """
+    _SAFE_EXPR_RE = re.compile(r"^[0-9+\-*/().%\s]+$")
+
     def query(self, prompt: str) -> Tuple[str, str]:
-        # Try to extract code from the prompt
         clean_expr = "".join(c for c in prompt if c in "0123456789+-*/().% ")
-        if clean_expr.strip():
+        if clean_expr.strip() and self._SAFE_EXPR_RE.match(clean_expr.strip()):
             try:
-                result = eval(clean_expr.strip())
+                result = eval(clean_expr.strip(), {"__builtins__": {}}, {})
                 return "Python-Executor", f"**Result:** `{result}`"
-            except Exception:
-                pass
-        # Run the raw prompt as code
-        result = execute_python_code(prompt)
-        return "Python-Executor", f"```\n{result}\n```"
+            except Exception as e:
+                return "Python-Executor", f"Could not evaluate expression: {e}"
+        return (
+            "Python-Executor",
+            "The Python Executor node only evaluates arithmetic expressions "
+            "(e.g. `2 * (3 + 4)`). For general code, use the Code Specialist "
+            "or Auto Hive Mode."
+        )
 
 
 # ─────────────────────────────────────────────
@@ -251,6 +363,7 @@ class HiveOrchestrator:
         self.executor = PythonExecutorConnector() # ⚡ Raw Python execution
 
     def query(self, prompt: str) -> Tuple[str, str]:
+        _ensure_gemini_configured()
         import google.generativeai as genai
         # Step 1: Use a lightweight Gemini model as the routing brain
         # It only has ONE job: classify the task type and output a JSON decision.
@@ -276,7 +389,7 @@ class HiveOrchestrator:
                 prompt,
                 request_options={"timeout": 8.0}
             )
-            raw = routing_response.text.strip().strip("```json").strip("```").strip()
+            raw = _extract_json_block(routing_response.text)
             decision = json.loads(raw)
             agent = decision.get("agent", "gemini")
             reason = decision.get("reason", "Routed by Hive Orchestrator")

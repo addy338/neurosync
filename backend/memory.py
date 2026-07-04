@@ -24,11 +24,20 @@ class RAGMemoryManager:
     def __init__(self):
         self.collection = collection
 
+    # Bug #10 fix: node names / response prefixes that indicate a failed
+    # call rather than a real answer — these must never be recalled later
+    # as if they were genuine past context.
+    _ERROR_NODE_MARKERS = ("System-Error", "Ollama-Offline")
+
     def add_memory(self, prompt: str, response: str, model_used: str):
         """Stores a prompt-response pair as a memory vector."""
         if not self.collection:
             return
-            
+        if any(marker in model_used for marker in self._ERROR_NODE_MARKERS):
+            return
+        if response.strip().startswith("⚠️"):
+            return
+
         memory_id = str(uuid.uuid4())
         
         # The document is the full context we want the AI to remember

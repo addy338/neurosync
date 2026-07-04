@@ -58,6 +58,7 @@ def get_db():
 class PromptRequest(BaseModel):
     prompt: str
     model: str = "🐝 Auto Hive Mode"
+    use_memory: bool = True  # Bug #3 fix: memory is no longer forced-on
 
 class TaskResponse(BaseModel):
     id: int
@@ -75,33 +76,40 @@ def create_task(request: PromptRequest, db: Session = Depends(get_db)):
     """
     Receive a complex prompt, retrieve past memory, route it, and save the result.
     """
-    # 🧠 Step 1: Memory Recall (RAG)
-    # Check if we have past context relevant to this prompt
-    past_context = memory.recall_memory(request.prompt)
+    # 🧠 Step 1: Memory Recall (RAG) — now skippable via use_memory
+    past_context = memory.recall_memory(request.prompt) if request.use_memory else ""
     
     # Construct the final prompt to send to the AI
     enriched_prompt = past_context + request.prompt if past_context else request.prompt
 
     # 🐝 Step 2: Routing & Execution
     connector = MODEL_REGISTRY.get(request.model, hive)
-    node_name, response_text = connector.query(enriched_prompt)
-    
-    # 🧠 Step 3: Memory Storage
-    # Save this interaction to Long-Term Memory
+    try:
+        node_name, response_text = connector.query(enriched_prompt)
+    except Exception as e:
+        node_name, response_text = "System-Error", f"⚠️ Unhandled failure: {e}"
+
+    # Bug fix: status now reflects real outcome instead of always "success"
+    status = "error" if node_name in ("System-Error", "Ollama-Offline") else "success"
+
+    # 🧠 Step 3: Memory Storage (error responses are filtered inside memory.py)
     memory.add_memory(request.prompt, response_text, node_name)
 
     # 💾 Step 4: UI Database Storage
-    # Save to SQLite database for the UI history
     new_task = database.TaskLog(
         original_prompt=request.prompt,
-        status="success",
+        status=status,
         assigned_node=node_name,
         response_text=response_text
     )
-    db.add(new_task)
-    db.commit()
-    db.refresh(new_task) 
-    
+    try:
+        db.add(new_task)
+        db.commit()
+        db.refresh(new_task)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to persist task: {e}")
+
     return new_task
 
 @app.get("/tasks/", response_model=List[TaskResponse])

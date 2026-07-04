@@ -1,9 +1,14 @@
+import os
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
-# Define the local database URL (SQLite is perfect for this local hub)
-SQLALCHEMY_DATABASE_URL = "sqlite:///../neurosync.db"
+# Bug #7 fix: the previous relative path put the DB wherever uvicorn
+# happened to be launched from. Anchor it to this file's location so it's
+# always <project_root>/neurosync.db regardless of working directory.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(os.path.dirname(BASE_DIR), "neurosync.db")
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Create the SQLAlchemy engine that connects to the database
 engine = create_engine(

@@ -28,10 +28,10 @@ class LocalConnectors:
         Attempts to route the prompt to Ollama.
         If Ollama is down, falls back to local Python execution for basic commands.
         """
-        # 1. Try Ollama (assuming llama3 is installed)
+        # 1. Try Ollama (using llama3.2:latest)
         try:
             data = json.dumps({
-                "model": "llama3",
+                "model": "llama3.2:latest",
                 "prompt": prompt,
                 "stream": False
             }).encode('utf-8')

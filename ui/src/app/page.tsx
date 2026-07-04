@@ -40,6 +40,9 @@ export default function Home() {
     setIsTyping(true);
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
       // Send real request to FastAPI Backend
       const response = await fetch("http://localhost:8000/tasks/", {
         method: "POST",
@@ -47,7 +50,9 @@ export default function Home() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ prompt: newUserMsg.text, model: model }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
       const data = await response.json();
       
@@ -59,10 +64,13 @@ export default function Home() {
       };
       
       setMessages(prev => [...prev, newAiMsg]);
-    } catch (error) {
+    } catch (error: any) {
+      const msg = error?.name === "AbortError"
+        ? "Request timed out after 30 seconds. The backend may be overloaded."
+        : "Error: Could not connect to the NeuroSync backend. Is the FastAPI server running on port 8000?";
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
-        text: "Error: Could not connect to the NeuroSync backend. Is the FastAPI server running on port 8000?",
+        text: msg,
         sender: "ai",
         node: "System Error"
       }]);

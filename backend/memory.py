@@ -56,10 +56,14 @@ class RAGMemoryManager:
             return ""
             
         try:
+            count = self.collection.count()
+            if count == 0:
+                return ""
+            
             # Query ChromaDB. It automatically embeds the query and finds the closest vectors.
             results = self.collection.query(
                 query_texts=[query],
-                n_results=n_results
+                n_results=min(n_results, count)
             )
             
             documents = results.get("documents", [[]])[0]

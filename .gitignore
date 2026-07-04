@@ -5,3 +5,4 @@ __pycache__/
 neurosync.db
 node_modules/
 .next/
+backend/chroma_db/

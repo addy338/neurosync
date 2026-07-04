@@ -1,8 +1,13 @@
 import json
 import os
-import subprocess
+import io
+import sys
+import warnings
 from typing import Tuple
 from dotenv import load_dotenv
+
+# Suppress deprecated SDK warnings (Bug #5)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 load_dotenv()
 
@@ -16,20 +21,24 @@ load_dotenv()
 def execute_python_code(code: str) -> str:
     """
     Executes the given Python code locally and returns stdout/stderr.
-    Use this for calculations, data processing, or any task requiring
-    deterministic computation rather than language model estimation.
+    Uses in-process exec() to avoid subprocess forks that crash gRPC.
     """
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    redirected_output = sys.stdout = io.StringIO()
+    redirected_error = sys.stderr = io.StringIO()
+    
     try:
-        result = subprocess.run(
-            ["python", "-c", code],
-            capture_output=True, text=True, timeout=15
-        )
-        out = (result.stdout + "\n" + result.stderr).strip()
-        return out if out else "Executed successfully with no output."
-    except subprocess.TimeoutExpired:
-        return "Error: Python code execution timed out (>15s)."
+        # Execute in a clean namespace
+        exec(code, {"__builtins__": __builtins__})
     except Exception as e:
-        return f"Execution Error: {e}"
+        print(f"Execution Error: {e}", file=sys.stderr)
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        
+    out = (redirected_output.getvalue() + "\n" + redirected_error.getvalue()).strip()
+    return out if out else "Executed successfully with no output."
 
 
 # ─────────────────────────────────────────────
@@ -82,7 +91,10 @@ class GeminiConnector:
 
             return "Gemini-2.5-Flash", orchestration_log + response.text
         except Exception as e:
-            return "System-Error", f"Gemini failed: {str(e)}"
+            err = str(e)
+            if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                return "System-Error", "⚠️ **Gemini 2.5 Flash is rate-limited** (free tier: 20 req/day). Try again tomorrow or switch to a local model."
+            return "System-Error", f"⚠️ Gemini 2.5 Flash error: {err[:120]}"
 
 
 # ─────────────────────────────────────────────
@@ -119,7 +131,10 @@ class CodeSpecialistConnector:
             response = self.model.generate_content(prompt)
             return "Code-Specialist (Gemini-2.0-Flash)", response.text
         except Exception as e:
-            return "System-Error", f"Code Specialist failed: {str(e)}"
+            err = str(e)
+            if "429" in err or "quota" in err.lower():
+                return "System-Error", "⚠️ **Code Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
+            return "System-Error", f"⚠️ Code Specialist error: {err[:120]}"
 
 
 # ─────────────────────────────────────────────
@@ -156,7 +171,10 @@ class WritingSpecialistConnector:
             response = self.model.generate_content(prompt)
             return "Writing-Specialist (Gemini-2.5-Flash-Lite)", response.text
         except Exception as e:
-            return "System-Error", f"Writing Specialist failed: {str(e)}"
+            err = str(e)
+            if "429" in err or "quota" in err.lower():
+                return "System-Error", "⚠️ **Writing Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
+            return "System-Error", f"⚠️ Writing Specialist error: {err[:120]}"
 
 
 # ─────────────────────────────────────────────
@@ -185,9 +203,8 @@ class OllamaConnector:
                 result = json.loads(resp.read().decode('utf-8'))
                 return "Llama-3.2-Local", result.get("response", "No response")
         except Exception as e:
-            print(f"Ollama offline: {e}. Falling back to Python Executor.")
-            result = execute_python_code(prompt)
-            return "Python-Executor-Fallback", result
+            # Bug #2 Fix: Do not execute plain text as code if Ollama fails
+            return "Ollama-Offline", "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
 
 
 # ─────────────────────────────────────────────
@@ -255,14 +272,28 @@ class HiveOrchestrator:
                     "- Simple arithmetic only → 'executor'."
                 )
             )
-            routing_response = router_model.generate_content(prompt)
+            routing_response = router_model.generate_content(
+                prompt,
+                request_options={"timeout": 8.0}
+            )
             raw = routing_response.text.strip().strip("```json").strip("```").strip()
             decision = json.loads(raw)
             agent = decision.get("agent", "gemini")
             reason = decision.get("reason", "Routed by Hive Orchestrator")
         except Exception as e:
-            agent = "gemini"
-            reason = f"Routing failed ({e}), defaulted to Gemini Orchestrator."
+            # Bug #3 Fix: Instant offline fallback
+            prompt_lower = prompt.lower()
+            if any(w in prompt_lower for w in ["calculate", "math", "+", "-", "*", "/", "prime"]):
+                agent = "gemini"
+            elif any(w in prompt_lower for w in ["code", "debug", "python", "javascript", "function"]):
+                agent = "coder"
+            elif any(w in prompt_lower for w in ["write", "essay", "explain", "summarize"]):
+                agent = "writer"
+            elif any(w in prompt_lower for w in ["private", "local", "secret"]):
+                agent = "ollama"
+            else:
+                agent = "gemini"
+            reason = f"API offline ({str(e)[:50]}). Used instant keyword fallback."
 
         # Step 2: Map the routing decision to the actual connector
         agent_map = {
@@ -280,6 +311,14 @@ class HiveOrchestrator:
             f"> _{reason}_\n\n---\n\n"
         )
 
-        # Step 4: Call the specialist
+        # Step 4: Call the specialist — cascade to Ollama if primary fails
         node_name, text = connector.query(prompt)
+        
+        # If the chosen cloud connector failed with a rate-limit, cascade to Ollama
+        if node_name == "System-Error" and ("rate-limited" in text or "quota" in text.lower()):
+            ollama_name, ollama_text = self.ollama.query(prompt)
+            if ollama_name != "Ollama-Offline":
+                cascade_header = routing_header + "\n> 🔄 _Gemini quota exhausted — cascaded to local Llama 3.2_\n\n---\n\n"
+                return f"Hive→{ollama_name}", cascade_header + ollama_text
+        
         return f"Hive→{node_name}", routing_header + text

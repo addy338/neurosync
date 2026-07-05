@@ -187,7 +187,7 @@ class GeminiConnector:
             )
         )
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
         try:
             chat = self.model.start_chat(enable_automatic_function_calling=True)
             response = chat.send_message(prompt)
@@ -211,14 +211,28 @@ class GeminiConnector:
                         except Exception:
                             pass
 
-            return "Gemini-2.5-Flash", orchestration_log + response.text
+            # Fix 1d: response.text raises if the model ended on a function_call
+            # instead of a text part (hits the SDK's internal turn cap). Catch it
+            # and surface the orchestration log rather than a raw SDK traceback.
+            try:
+                final_text = response.text
+            except Exception:
+                final_text = (
+                    "The model ran a tool but didn't produce a final text answer. "
+                    "Here's what it attempted:\n\n" + orchestration_log
+                    if orchestration_log else
+                    "The model didn't return a text response. Try rephrasing your request."
+                )
+                return "Gemini-2.5-Flash", final_text
+
+            return "Gemini-2.5-Flash", orchestration_log + final_text
         except Exception as e:
             err = str(e)
             if "429" in err or "quota" in err.lower() or "rate" in err.lower():
                 return "System-Error", "⚠️ **Gemini 2.5 Flash is rate-limited** (free tier: 20 req/day). Try again tomorrow or switch to a local model."
             return "System-Error", f"⚠️ Gemini 2.5 Flash error: {err[:120]}"
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         """
         Yields SSE chunks as Gemini streams its response token by token.
         Function calls (tool use) can't be streamed mid-flight, so if
@@ -277,7 +291,7 @@ class CodeSpecialistConnector:
             )
         )
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
         try:
             response = self.model.generate_content(prompt)
             return "Code-Specialist (Gemini-2.0-Flash)", response.text
@@ -287,7 +301,7 @@ class CodeSpecialistConnector:
                 return "System-Error", "⚠️ **Code Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
             return "System-Error", f"⚠️ Code Specialist error: {err[:120]}"
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         try:
             response_stream = self.model.generate_content(prompt, stream=True)
             full_text = ""
@@ -333,7 +347,7 @@ class WritingSpecialistConnector:
             )
         )
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
         try:
             response = self.model.generate_content(prompt)
             return "Writing-Specialist (Gemini-2.5-Flash-Lite)", response.text
@@ -343,7 +357,7 @@ class WritingSpecialistConnector:
                 return "System-Error", "⚠️ **Writing Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
             return "System-Error", f"⚠️ Writing Specialist error: {err[:120]}"
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         try:
             response_stream = self.model.generate_content(prompt, stream=True)
             full_text = ""
@@ -378,7 +392,7 @@ class OllamaConnector:
     def __init__(self):
         self.ollama_url = "http://localhost:11434/api/generate"
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
         import urllib.request, urllib.error
         try:
             data = json.dumps({
@@ -396,7 +410,7 @@ class OllamaConnector:
         except Exception:
             return "Ollama-Offline", "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         """
         Uses Ollama's native streaming mode (stream: true).
         Ollama sends a newline-delimited JSON stream where each line is:
@@ -453,7 +467,7 @@ class PythonExecutorConnector:
     """
     _SAFE_EXPR_RE = re.compile(r"^[0-9+\-*/().%\s]+$")
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
         clean_expr = "".join(c for c in prompt if c in "0123456789+-*/().% ")
         if clean_expr.strip() and self._SAFE_EXPR_RE.match(clean_expr.strip()):
             try:
@@ -468,7 +482,7 @@ class PythonExecutorConnector:
             "or Auto Hive Mode."
         )
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         # Execution is instant — no real streaming needed. Emit as a single chunk.
         node_name, result = self.query(prompt)
         yield _sse("chunk", result)
@@ -556,7 +570,15 @@ class HiveOrchestrator:
                 agent = "coder"
             elif any(w in prompt_lower for w in ["write", "essay", "explain", "summarize"]):
                 agent = "writer"
-            elif any(w in prompt_lower for w in ["private", "local", "secret"]):
+            elif any(w in prompt_lower for w in [
+                # Fix 1c: Widen Ollama routing — previously only matched "local",
+                # "private", "secret". "use a different model", "use ollama",
+                # "use llama" etc. all fell through to gemini (the very thing
+                # the user was trying to avoid).
+                "private", "local", "secret", "offline",
+                "other model", "different model", "switch model", "another model",
+                "ollama", "llama",
+            ]):
                 agent = "ollama"
             else:
                 agent = "gemini"
@@ -569,32 +591,39 @@ class HiveOrchestrator:
         )
         return agent, routing_header, connector
 
-    def query(self, prompt: str) -> Tuple[str, str]:
-        agent, routing_header, connector = self._route(prompt)
+    def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
+        # Fix 1b: clean_prompt is the user's raw text, without any memory context
+        # prepended. The specialist still gets the full enriched prompt (better answers),
+        # but the cascade fallback gets the clean version so a small local model
+        # isn't handed a wall of old error text instead of the actual question.
+        clean_prompt = original_prompt or prompt
+        agent, routing_header, connector = self._route(clean_prompt)
 
-        # Call the specialist — cascade to Ollama if primary is rate-limited
+        # Specialist gets the full enriched prompt for best quality
         node_name, text = connector.query(prompt)
 
         if node_name == "System-Error" and ("rate-limited" in text or "quota" in text.lower()):
-            ollama_name, ollama_text = self.ollama.query(prompt)
+            # Cascade uses the CLEAN prompt — not the memory-enriched one
+            ollama_name, ollama_text = self.ollama.query(clean_prompt)
             if ollama_name != "Ollama-Offline":
                 cascade_header = routing_header + "\n> 🔄 _Gemini quota exhausted — cascaded to local Llama 3.2_\n\n---\n\n"
                 return f"Hive→{ollama_name}", cascade_header + ollama_text
 
         return f"Hive→{node_name}", routing_header + text
 
-    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+    def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         """
         Streaming version of query(). Emits the routing header as the
         first SSE chunk so the browser can show which node was chosen
         before the actual response starts arriving.
         """
-        agent, routing_header, connector = self._route(prompt)
+        clean_prompt = original_prompt or prompt
+        agent, routing_header, connector = self._route(clean_prompt)
 
         # Emit the routing decision immediately — no waiting for the model
         yield _sse("node", routing_header)
 
-        # Stream from the chosen specialist
+        # Stream from the chosen specialist (full enriched prompt for quality)
         gen = connector.stream_query(prompt)
         full_text = ""
         try:
@@ -609,13 +638,15 @@ class HiveOrchestrator:
             node_name_from_gen, _ = e.value if e.value else ("Unknown", "")
             node_name = node_name_from_gen
 
-        # Cascade to Ollama if the primary model was rate-limited
+        # Cascade to Ollama if the primary model was rate-limited.
+        # Use clean_prompt so Ollama gets the user's actual question, not
+        # a prompt stuffed with old error text from memory recall.
         if "rate-limited" in full_text or "quota" in full_text.lower():
             cascade_note = "\n\n> 🔄 _Gemini quota exhausted — cascading to local Llama 3.2..._\n\n"
             yield _sse("chunk", cascade_note)
             full_text = cascade_note
 
-            ollama_gen = self.ollama.stream_query(prompt)
+            ollama_gen = self.ollama.stream_query(clean_prompt)
             try:
                 while True:
                     chunk_sse = next(ollama_gen)

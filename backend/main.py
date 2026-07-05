@@ -90,7 +90,7 @@ def create_task(request: PromptRequest, db: Session = Depends(get_db)):
     # 🐝 Step 2: Routing & Execution
     connector = MODEL_REGISTRY.get(request.model, hive)
     try:
-        node_name, response_text = connector.query(enriched_prompt)
+        node_name, response_text = connector.query(enriched_prompt, original_prompt=request.prompt)
     except Exception as e:
         node_name, response_text = "System-Error", f"⚠️ Unhandled failure: {e}"
 
@@ -152,7 +152,7 @@ def stream_task(request: PromptRequest, db: Session = Depends(get_db)):
         node_name = "Unknown"
 
         try:
-            gen = connector.stream_query(enriched_prompt)
+            gen = connector.stream_query(enriched_prompt, original_prompt=request.prompt)
             try:
                 while True:
                     sse_chunk = next(gen)

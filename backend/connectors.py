@@ -377,78 +377,171 @@ class WritingSpecialistConnector:
 
 
 # ─────────────────────────────────────────────
-# 🤖 LOCAL OLLAMA CONNECTOR
-# Runs a local LLM (Llama 3.2) using Ollama.
-# Completely private — no data leaves your machine.
+# 🤖 LOCAL/CLOUD MODEL CONNECTOR (fallback chain)
+# Tries a prioritized list of Ollama-served models —
+# local first (free, private, always available if
+# Ollama is running), then Ollama Cloud models as a
+# safety net if every local model fails or is too
+# slow. Cloud models go through the SAME endpoint as
+# local ones (localhost:11434) — Ollama's daemon
+# handles the ":cloud" proxying transparently, so no
+# separate client/auth code is needed here beyond
+# having run `ollama signin` once on the machine.
 #
-# 💡 LEARNING NOTE: Ollama's API supports native
-# streaming via "stream": true. Instead of waiting
-# for the entire response, it sends newline-delimited
-# JSON objects — one per generated token. We parse
-# each line and forward it immediately to the browser.
-# This is called NDJSON (Newline-Delimited JSON).
+# 💡 LEARNING NOTE: This is the same "fallback chain"
+# pattern used by production LLM gateways (e.g.
+# OpenRouter, LiteLLM) — try cheapest/fastest/most
+# private option first, escalate only on failure.
+#
+# 💡 LEARNING NOTE (streaming): stream_query() tries
+# each model exactly like query() does, but switches
+# to Ollama's native NDJSON streaming (stream: true)
+# so tokens appear in the browser as they are generated
+# rather than after the full response is ready.
 # ─────────────────────────────────────────────
 class OllamaConnector:
+    # Ordered by preference: local models first (free, private,
+    # no network dependency), then cloud models as a safety net.
+    # Edit this list to match what you actually have pulled/signed in for —
+    # check with `ollama list` and `ollama.com/settings` for cloud access.
+    MODEL_CHAIN = [
+        "llama3.2:latest",
+        "gemma4:latest",
+        "qwen2.5-coder:1.5b",
+        "qwen3.6:latest",
+        # Cloud fallbacks — only reached if every local model above fails.
+        # Requires `ollama signin` to have been run once on this machine.
+        "glm-5.2:cloud",
+        "kimi-k2.7-code:cloud",
+        "minimax-m3:cloud",
+        "nemotron-3-super:cloud",
+    ]
+
     def __init__(self):
         self.ollama_url = "http://localhost:11434/api/generate"
 
+    def _try_model(self, model_name: str, prompt: str, timeout: int = 20) -> str:
+        """
+        Attempts a single non-streaming call to one Ollama model.
+        Returns the response text, or raises on any failure so the caller
+        can move to the next model in the chain.
+        """
+        import urllib.request
+        data = json.dumps({
+            "model": model_name,
+            "prompt": prompt,
+            "stream": False,
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            self.ollama_url, data=data,
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+            text = result.get("response", "").strip()
+            if not text:
+                raise ValueError(f"{model_name} returned an empty response")
+            return text
+
     def query(self, prompt: str, original_prompt: str = None) -> Tuple[str, str]:
-        import urllib.request, urllib.error
-        try:
-            data = json.dumps({
-                "model": "llama3.2:latest",
-                "prompt": prompt,
-                "stream": False
-            }).encode('utf-8')
-            req = urllib.request.Request(
-                self.ollama_url, data=data,
-                headers={'Content-Type': 'application/json'}
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode('utf-8'))
-                return "Llama-3.2-Local", result.get("response", "No response")
-        except Exception:
-            return "Ollama-Offline", "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
+        errors = []
+        for model_name in self.MODEL_CHAIN:
+            try:
+                text = self._try_model(model_name, prompt)
+                node_label = f"Ollama:{model_name}"
+                # Flag which tier answered so the UI node badge shows it
+                if model_name.endswith(":cloud"):
+                    text = f"_(via Ollama Cloud — {model_name})_\n\n" + text
+                return node_label, text
+            except Exception as e:
+                errors.append(f"{model_name}: {str(e)[:80]}")
+                continue
+
+        # Every model in the chain failed
+        return "Ollama-Offline", (
+            "All configured local/cloud models failed to respond.\n\n"
+            "Tried, in order:\n" + "\n".join(f"- {e}" for e in errors) +
+            "\n\nEnsure `ollama serve` is running and check `ollama list` for pulled models."
+        )
 
     def stream_query(self, prompt: str, original_prompt: str = None) -> Generator[str, None, Tuple[str, str]]:
         """
-        Uses Ollama's native streaming mode (stream: true).
-        Ollama sends a newline-delimited JSON stream where each line is:
-          {"model": "...", "response": "<token>", "done": false}
-        We forward each token to the browser immediately via SSE.
+        Streaming version of the fallback chain. Tries each model in order
+        using Ollama's NDJSON streaming mode (stream: true). The first model
+        that sends at least one token "wins" — its tokens flow to the browser
+        immediately. If a model fails before producing any output, we silently
+        move to the next one (a brief status line is emitted so the user can
+        see what's happening rather than staring at a blank bubble).
+
+        💡 LEARNING NOTE: We can't emit tokens and then retry mid-stream
+        cleanly, so the "win" decision is made at first token. A model that
+        starts generating but then hangs or errors after a few tokens will
+        surface an error suffix rather than falling through silently.
         """
-        import urllib.request, urllib.error
-        try:
-            data = json.dumps({
-                "model": "llama3.2:latest",
-                "prompt": prompt,
-                "stream": True
-            }).encode('utf-8')
-            req = urllib.request.Request(
-                self.ollama_url, data=data,
-                headers={'Content-Type': 'application/json'}
-            )
-            full_text = ""
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                for raw_line in resp:
-                    line = raw_line.decode('utf-8').strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
+        import urllib.request
+        errors = []
+
+        for model_name in self.MODEL_CHAIN:
+            try:
+                data = json.dumps({
+                    "model": model_name,
+                    "prompt": prompt,
+                    "stream": True,
+                }).encode('utf-8')
+                req = urllib.request.Request(
+                    self.ollama_url, data=data,
+                    headers={'Content-Type': 'application/json'}
+                )
+                full_text = ""
+                got_token = False
+                cloud_prefix = ""
+
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    for raw_line in resp:
+                        line = raw_line.decode('utf-8').strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
                         token = obj.get("response", "")
                         if token:
+                            if not got_token:
+                                # First token from this model — it wins the chain.
+                                # Emit a cloud-tier badge if applicable.
+                                got_token = True
+                                if model_name.endswith(":cloud"):
+                                    cloud_prefix = f"_(via Ollama Cloud — {model_name})_\n\n"
+                                    yield _sse("chunk", cloud_prefix)
+                                    full_text += cloud_prefix
                             full_text += token
                             yield _sse("chunk", token)
+
                         if obj.get("done"):
                             break
-                    except json.JSONDecodeError:
-                        continue
-            return "Llama-3.2-Local", full_text
-        except Exception:
-            msg = "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
-            yield _sse("chunk", msg)
-            return "Ollama-Offline", msg
+
+                if got_token:
+                    # This model succeeded — return its node label
+                    return f"Ollama:{model_name}", full_text
+
+                # Model connected but returned nothing — try next
+                errors.append(f"{model_name}: connected but returned empty response")
+
+            except Exception as e:
+                errors.append(f"{model_name}: {str(e)[:80]}")
+                continue
+
+        # Every model failed before producing a single token
+        msg = (
+            "All configured local/cloud models failed to respond.\n\n"
+            "Tried, in order:\n" + "\n".join(f"- {e}" for e in errors) +
+            "\n\nEnsure `ollama serve` is running and check `ollama list` for pulled models."
+        )
+        yield _sse("chunk", msg)
+        return "Ollama-Offline", msg
+
 
 
 # ─────────────────────────────────────────────

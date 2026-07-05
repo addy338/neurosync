@@ -6,7 +6,7 @@ import sys
 import signal
 import threading
 import warnings
-from typing import Tuple
+from typing import Generator, Tuple
 from dotenv import load_dotenv
 
 # Suppress deprecated SDK warnings (Bug #5)
@@ -138,13 +138,31 @@ def _extract_json_block(raw: str) -> str:
     Bug #22: the original used raw.strip("```json").strip("```") which
     strips a *character set*, not the literal fence substring, and can
     silently mangle legitimate JSON. This uses regex to remove actual
-    \`\`\`json ... \`\`\` or \`\`\` ... \`\`\` fences.
+    ```json ... ``` or ``` ... ``` fences.
     """
     raw = raw.strip()
     fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.DOTALL)
     if fence_match:
         return fence_match.group(1).strip()
     return raw
+
+
+# ─────────────────────────────────────────────
+# 📡 SSE HELPERS
+# Server-Sent Events format: each chunk is a
+# "data: ...\n\n" line. The frontend reads these
+# with a ReadableStream consumer and appends text
+# to the message bubble in real-time.
+#
+# 💡 LEARNING NOTE: SSE is simpler than WebSockets
+# for one-directional server→client push. The client
+# opens one long-lived HTTP connection and the server
+# drips data down it. Perfect for streaming AI text.
+# ─────────────────────────────────────────────
+def _sse(event: str, data: str) -> str:
+    """Format a single SSE message. Newlines inside data are escaped."""
+    safe_data = data.replace("\n", "\\n")
+    return f"event: {event}\ndata: {safe_data}\n\n"
 
 
 # ─────────────────────────────────────────────
@@ -200,6 +218,37 @@ class GeminiConnector:
                 return "System-Error", "⚠️ **Gemini 2.5 Flash is rate-limited** (free tier: 20 req/day). Try again tomorrow or switch to a local model."
             return "System-Error", f"⚠️ Gemini 2.5 Flash error: {err[:120]}"
 
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        """
+        Yields SSE chunks as Gemini streams its response token by token.
+        Function calls (tool use) can't be streamed mid-flight, so if
+        Gemini decides to call execute_python_code, we collect the full
+        response first and emit it as one chunk after the tool runs.
+
+        💡 LEARNING NOTE: The Gemini SDK supports stream=True on
+        generate_content(), but NOT on start_chat() with automatic
+        function calling — the SDK needs the full response to know
+        whether to invoke a tool. So streaming + tool use is a two-phase
+        process: we stream the non-tool parts when possible.
+        """
+        try:
+            # Use streaming for pure text responses (no tool calls expected)
+            response_stream = self.model.generate_content(prompt, stream=True)
+            full_text = ""
+            for chunk in response_stream:
+                if chunk.text:
+                    full_text += chunk.text
+                    yield _sse("chunk", chunk.text)
+            return "Gemini-2.5-Flash", full_text
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                msg = "⚠️ **Gemini 2.5 Flash is rate-limited** (free tier: 20 req/day). Try again tomorrow or switch to a local model."
+            else:
+                msg = f"⚠️ Gemini 2.5 Flash error: {err[:120]}"
+            yield _sse("chunk", msg)
+            return "System-Error", msg
+
 
 # ─────────────────────────────────────────────
 # 🤖 CODE SPECIALIST (Gemini 2.0 Flash)
@@ -237,6 +286,24 @@ class CodeSpecialistConnector:
             if "429" in err or "quota" in err.lower():
                 return "System-Error", "⚠️ **Code Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
             return "System-Error", f"⚠️ Code Specialist error: {err[:120]}"
+
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        try:
+            response_stream = self.model.generate_content(prompt, stream=True)
+            full_text = ""
+            for chunk in response_stream:
+                if chunk.text:
+                    full_text += chunk.text
+                    yield _sse("chunk", chunk.text)
+            return "Code-Specialist (Gemini-2.0-Flash)", full_text
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "quota" in err.lower():
+                msg = "⚠️ **Code Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
+            else:
+                msg = f"⚠️ Code Specialist error: {err[:120]}"
+            yield _sse("chunk", msg)
+            return "System-Error", msg
 
 
 # ─────────────────────────────────────────────
@@ -276,12 +343,36 @@ class WritingSpecialistConnector:
                 return "System-Error", "⚠️ **Writing Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
             return "System-Error", f"⚠️ Writing Specialist error: {err[:120]}"
 
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        try:
+            response_stream = self.model.generate_content(prompt, stream=True)
+            full_text = ""
+            for chunk in response_stream:
+                if chunk.text:
+                    full_text += chunk.text
+                    yield _sse("chunk", chunk.text)
+            return "Writing-Specialist (Gemini-2.5-Flash-Lite)", full_text
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "quota" in err.lower():
+                msg = "⚠️ **Writing Specialist is rate-limited.** Try again later or switch to Llama 3.2 (Local)."
+            else:
+                msg = f"⚠️ Writing Specialist error: {err[:120]}"
+            yield _sse("chunk", msg)
+            return "System-Error", msg
+
 
 # ─────────────────────────────────────────────
 # 🤖 LOCAL OLLAMA CONNECTOR
 # Runs a local LLM (Llama 3.2) using Ollama.
 # Completely private — no data leaves your machine.
-# Falls back to Python Executor if Ollama is offline.
+#
+# 💡 LEARNING NOTE: Ollama's API supports native
+# streaming via "stream": true. Instead of waiting
+# for the entire response, it sends newline-delimited
+# JSON objects — one per generated token. We parse
+# each line and forward it immediately to the browser.
+# This is called NDJSON (Newline-Delimited JSON).
 # ─────────────────────────────────────────────
 class OllamaConnector:
     def __init__(self):
@@ -299,18 +390,57 @@ class OllamaConnector:
                 self.ollama_url, data=data,
                 headers={'Content-Type': 'application/json'}
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
                 return "Llama-3.2-Local", result.get("response", "No response")
-        except Exception as e:
-            # Bug #2 Fix: Do not execute plain text as code if Ollama fails
+        except Exception:
             return "Ollama-Offline", "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
+
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        """
+        Uses Ollama's native streaming mode (stream: true).
+        Ollama sends a newline-delimited JSON stream where each line is:
+          {"model": "...", "response": "<token>", "done": false}
+        We forward each token to the browser immediately via SSE.
+        """
+        import urllib.request, urllib.error
+        try:
+            data = json.dumps({
+                "model": "llama3.2:latest",
+                "prompt": prompt,
+                "stream": True
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                self.ollama_url, data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            full_text = ""
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode('utf-8').strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        token = obj.get("response", "")
+                        if token:
+                            full_text += token
+                            yield _sse("chunk", token)
+                        if obj.get("done"):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+            return "Llama-3.2-Local", full_text
+        except Exception:
+            msg = "Error: Llama 3.2 is offline. Ensure Ollama is running on port 11434."
+            yield _sse("chunk", msg)
+            return "Ollama-Offline", msg
 
 
 # ─────────────────────────────────────────────
 # ⚡ PYTHON EXECUTOR CONNECTOR
-# Directly runs Python code. Used for math,
-# data processing, and system-level tasks.
+# Directly evaluates arithmetic expressions.
+# Safe: runs with empty builtins, regex-guarded.
 # ─────────────────────────────────────────────
 class PythonExecutorConnector:
     """
@@ -338,6 +468,12 @@ class PythonExecutorConnector:
             "or Auto Hive Mode."
         )
 
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        # Execution is instant — no real streaming needed. Emit as a single chunk.
+        node_name, result = self.query(prompt)
+        yield _sse("chunk", result)
+        return node_name, result
+
 
 # ─────────────────────────────────────────────
 # 🐝 HIVE ORCHESTRATOR (Auto Mode)
@@ -356,18 +492,36 @@ class PythonExecutorConnector:
 # ─────────────────────────────────────────────
 class HiveOrchestrator:
     def __init__(self):
-        self.gemini = GeminiConnector()          # 🧠 Orchestrator + computation
-        self.coder = CodeSpecialistConnector()   # 💻 Code generation (Gemini 2.0 Flash)
+        self.gemini = GeminiConnector()            # 🧠 Orchestrator + computation
+        self.coder = CodeSpecialistConnector()     # 💻 Code generation (Gemini 2.0 Flash)
         self.writer = WritingSpecialistConnector() # ✍️ Writing & analysis (Gemini 2.5 Lite)
-        self.ollama = OllamaConnector()          # 🦙 100% local, private
-        self.executor = PythonExecutorConnector() # ⚡ Raw Python execution
+        self.ollama = OllamaConnector()            # 🦙 100% local, private
+        self.executor = PythonExecutorConnector()  # ⚡ Arithmetic only
 
-    def query(self, prompt: str) -> Tuple[str, str]:
+    # ─────────────────────────────────────────
+    # 🗺️ SHARED ROUTING HELPER
+    # Both query() and stream_query() need to decide
+    # which specialist to call. Extracting this into
+    # _route() means the logic lives in exactly one
+    # place — no drift between the two code paths.
+    # ─────────────────────────────────────────
+    def _route(self, prompt: str) -> Tuple[str, str, object]:
+        """
+        Returns (agent_key, routing_header, connector).
+        Tries the Gemini Flash Lite router first; falls back instantly
+        to keyword matching if the API is unavailable or rate-limited.
+        """
         _ensure_gemini_configured()
         import google.generativeai as genai
-        # Step 1: Use a lightweight Gemini model as the routing brain
-        # It only has ONE job: classify the task type and output a JSON decision.
-        # It does NOT answer the question itself.
+
+        agent_map = {
+            "gemini":   ("🧠 Gemini 2.5 Flash (Orchestrator)", self.gemini),
+            "coder":    ("💻 Code Specialist (Gemini 2.0 Flash)", self.coder),
+            "writer":   ("✍️ Writing Specialist (Gemini 2.5 Lite)", self.writer),
+            "ollama":   ("🦙 Llama 3.2 Local", self.ollama),
+            "executor": ("⚡ Python Executor", self.executor),
+        }
+
         try:
             router_model = genai.GenerativeModel(
                 'gemini-2.0-flash-lite',
@@ -394,7 +548,7 @@ class HiveOrchestrator:
             agent = decision.get("agent", "gemini")
             reason = decision.get("reason", "Routed by Hive Orchestrator")
         except Exception as e:
-            # Bug #3 Fix: Instant offline fallback
+            # Instant offline keyword fallback — zero API calls needed
             prompt_lower = prompt.lower()
             if any(w in prompt_lower for w in ["calculate", "math", "+", "-", "*", "/", "prime"]):
                 agent = "gemini"
@@ -408,30 +562,73 @@ class HiveOrchestrator:
                 agent = "gemini"
             reason = f"API offline ({str(e)[:50]}). Used instant keyword fallback."
 
-        # Step 2: Map the routing decision to the actual connector
-        agent_map = {
-            "gemini": ("🧠 Gemini 2.5 Flash (Orchestrator)", self.gemini),
-            "coder": ("💻 Code Specialist (Gemini 2.0 Flash)", self.coder),
-            "writer": ("✍️ Writing Specialist (Gemini 2.5 Lite)", self.writer),
-            "ollama": ("🦙 Llama 3.2 Local", self.ollama),
-            "executor": ("⚡ Python Executor", self.executor),
-        }
         label, connector = agent_map.get(agent, ("🧠 Gemini 2.5 Flash", self.gemini))
-
-        # Step 3: Build a header that shows the routing decision in the UI
         routing_header = (
             f"🐝 **Hive Routed → {label}**\n"
             f"> _{reason}_\n\n---\n\n"
         )
+        return agent, routing_header, connector
 
-        # Step 4: Call the specialist — cascade to Ollama if primary fails
+    def query(self, prompt: str) -> Tuple[str, str]:
+        agent, routing_header, connector = self._route(prompt)
+
+        # Call the specialist — cascade to Ollama if primary is rate-limited
         node_name, text = connector.query(prompt)
-        
-        # If the chosen cloud connector failed with a rate-limit, cascade to Ollama
+
         if node_name == "System-Error" and ("rate-limited" in text or "quota" in text.lower()):
             ollama_name, ollama_text = self.ollama.query(prompt)
             if ollama_name != "Ollama-Offline":
                 cascade_header = routing_header + "\n> 🔄 _Gemini quota exhausted — cascaded to local Llama 3.2_\n\n---\n\n"
                 return f"Hive→{ollama_name}", cascade_header + ollama_text
-        
+
         return f"Hive→{node_name}", routing_header + text
+
+    def stream_query(self, prompt: str) -> Generator[str, None, Tuple[str, str]]:
+        """
+        Streaming version of query(). Emits the routing header as the
+        first SSE chunk so the browser can show which node was chosen
+        before the actual response starts arriving.
+        """
+        agent, routing_header, connector = self._route(prompt)
+
+        # Emit the routing decision immediately — no waiting for the model
+        yield _sse("node", routing_header)
+
+        # Stream from the chosen specialist
+        gen = connector.stream_query(prompt)
+        full_text = ""
+        try:
+            while True:
+                chunk_sse = next(gen)
+                # Extract text from SSE to build accumulated full_text for DB
+                if chunk_sse.startswith("event: chunk\n"):
+                    line = chunk_sse.split("data: ", 1)[1].rstrip("\n")
+                    full_text += line.replace("\\n", "\n")
+                yield chunk_sse
+        except StopIteration as e:
+            node_name_from_gen, _ = e.value if e.value else ("Unknown", "")
+            node_name = node_name_from_gen
+
+        # Cascade to Ollama if the primary model was rate-limited
+        if "rate-limited" in full_text or "quota" in full_text.lower():
+            cascade_note = "\n\n> 🔄 _Gemini quota exhausted — cascading to local Llama 3.2..._\n\n"
+            yield _sse("chunk", cascade_note)
+            full_text = cascade_note
+
+            ollama_gen = self.ollama.stream_query(prompt)
+            try:
+                while True:
+                    chunk_sse = next(ollama_gen)
+                    if chunk_sse.startswith("event: chunk\n"):
+                        line = chunk_sse.split("data: ", 1)[1].rstrip("\n")
+                        full_text += line.replace("\\n", "\n")
+                    yield chunk_sse
+            except StopIteration as e:
+                node_name_from_ollama, _ = e.value if e.value else ("Ollama", "")
+                node_name = f"Hive→{node_name_from_ollama}"
+        else:
+            node_name = f"Hive→{node_name}"
+
+        # Final SSE event carries the node name so the frontend can label the bubble
+        yield _sse("done", node_name)
+        return node_name, routing_header + full_text

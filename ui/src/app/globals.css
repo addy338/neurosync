@@ -244,3 +244,16 @@ body {
   font-weight: 700;
   color: #fff;
 }
+
+/* ── Streaming cursor ─────────────────────── */
+.streaming-cursor {
+  display: inline-block;
+  margin-left: 4px;
+  color: var(--accent-blue);
+  animation: blink 0.9s step-start infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}

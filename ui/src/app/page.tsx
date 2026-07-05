@@ -101,7 +101,7 @@ export default function Home() {
 
           // Parse the SSE event type and data
           const eventLine = part.match(/^event:\s*(.+)$/m);
-          const dataLine  = part.match(/^data:\s*(.+)$/m);
+          const dataLine  = part.match(/^data: ?(.*)$/m);
           if (!eventLine || !dataLine) continue;
 
           const event = eventLine[1].trim();

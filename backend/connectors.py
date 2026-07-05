@@ -400,21 +400,19 @@ class WritingSpecialistConnector:
 # rather than after the full response is ready.
 # ─────────────────────────────────────────────
 class OllamaConnector:
-    # Ordered by preference: local models first (free, private,
-    # no network dependency), then cloud models as a safety net.
-    # Edit this list to match what you actually have pulled/signed in for —
-    # check with `ollama list` and `ollama.com/settings` for cloud access.
+    # ── Confirmed installed models (from `ollama list` on 2025-07-05) ──
+    # Ordered by capability then speed:
+    #   gemma4:latest      — 9.6 GB, most capable, use when quality matters
+    #   llama3.2:latest    — 2.0 GB, solid general-purpose, fast on CPU
+    #   llama3.2:1b        — 1.3 GB, lightest local model, fastest fallback
+    #   qwen2.5-coder:1.5b — 986 MB, specialist for code; last resort
+    # Cloud models omitted — add them here (e.g. "glm-5.2:cloud") once
+    # pulled via `ollama pull glm-5.2:cloud`.
     MODEL_CHAIN = [
-        "llama3.2:latest",
         "gemma4:latest",
+        "llama3.2:latest",
+        "llama3.2:1b",
         "qwen2.5-coder:1.5b",
-        "qwen3.6:latest",
-        # Cloud fallbacks — only reached if every local model above fails.
-        # Requires `ollama signin` to have been run once on this machine.
-        "glm-5.2:cloud",
-        "kimi-k2.7-code:cloud",
-        "minimax-m3:cloud",
-        "nemotron-3-super:cloud",
     ]
 
     def __init__(self):

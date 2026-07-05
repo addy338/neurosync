@@ -33,9 +33,28 @@ class RAGMemoryManager:
         """Stores a prompt-response pair as a memory vector."""
         if not self.collection:
             return
-        if any(marker in model_used for marker in self._ERROR_NODE_MARKERS):
+
+        # Never store failed/error/execution-failure responses as if they
+        # were real answers — otherwise future prompts recall them as "past
+        # context" and confuse whichever model reads them back.
+        if model_used in ("System-Error", "Ollama-Offline"):
             return
         if response.strip().startswith("⚠️"):
+            return
+        # Broadened: also catch code-execution failures regardless of which
+        # node produced them (Python-Executor, Gemini tool-calling, etc.).
+        # These don't come from a System-Error node and don't start with ⚠️,
+        # so the earlier filter let them through into the vector store.
+        _failure_markers = (
+            "SyntaxError",
+            "Execution Error",
+            "Traceback (most recent call last)",
+            "Could not evaluate expression",
+            "NameError",
+            "TypeError:",
+            "only evaluates arithmetic expressions",
+        )
+        if any(marker in response for marker in _failure_markers):
             return
 
         memory_id = str(uuid.uuid4())
@@ -55,6 +74,30 @@ class RAGMemoryManager:
             print(f"🧠 Memory stored: {memory_id}")
         except Exception as e:
             print(f"Failed to store memory: {e}")
+
+    def clear_all(self) -> bool:
+        """
+        Wipes every stored memory from the vector database.
+        Use after fixing the error filter (so a fresh start doesn't get
+        immediately re-poisoned), or any time old/bad memories need to be
+        purged without restarting the server or touching files by hand.
+
+        Returns True on success, False if the collection isn't available
+        or the delete call fails.
+        """
+        if not self.collection:
+            return False
+        try:
+            all_ids = self.collection.get().get("ids", [])
+            if all_ids:
+                self.collection.delete(ids=all_ids)
+                print(f"🧠 Memory cleared: {len(all_ids)} entries deleted")
+            else:
+                print("🧠 Memory already empty — nothing to clear")
+            return True
+        except Exception as e:
+            print(f"Failed to clear memory: {e}")
+            return False
 
     def recall_memory(self, query: str, n_results: int = 2) -> str:
         """

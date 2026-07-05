@@ -209,3 +209,20 @@ def get_tasks(db: Session = Depends(get_db), limit: int = 10):
     """
     tasks = db.query(database.TaskLog).order_by(database.TaskLog.id.desc()).limit(limit).all()
     return tasks
+
+
+# ─────────────────────────────────────────────
+# 🧹 MEMORY MANAGEMENT
+# Clears all stored RAG memories without needing
+# a server restart or manual file deletion.
+# Use after a messy testing session, or any time
+# old/error memories need to be purged.
+#
+# Usage: curl -X POST http://localhost:8000/memory/clear
+# ─────────────────────────────────────────────
+@app.post("/memory/clear")
+def clear_memory():
+    ok = memory.clear_all()
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to clear memory — check server logs")
+    return {"cleared": True, "message": "All memories wiped. Fresh context from next request."}
